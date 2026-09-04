@@ -141,6 +141,7 @@ pub fn run() {
             commands::database::download_filtered_db,
             commands::excel::analyze_excel,
             commands::excel::import_excel,
+            commands::excel::generate_excel_template,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

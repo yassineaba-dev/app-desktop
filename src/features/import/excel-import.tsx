@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { X, Loader2, FileSpreadsheet, CheckCircle2, AlertTriangle } from "lucide-react";
+import { X, Loader2, FileSpreadsheet, CheckCircle2, AlertTriangle, Download } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useQueryClient } from "@tanstack/react-query";
 import { excelCommands } from "@/db/commands";
@@ -13,22 +13,28 @@ interface Props {
   onClose: () => void;
 }
 
-const FIELD_LABELS: { field: string; label: string }[] = [
+const ALL_FIELDS: { field: string; label: string; incomingOnly?: boolean; outgoingOnly?: boolean }[] = [
   { field: "registration_number", label: "الرقم الترتيبي" },
   { field: "correspondence_number", label: "رقمها" },
   { field: "date", label: "تاريخ الرسالة" },
-  { field: "arrival_date", label: "تاريخ الوصول" },
+  { field: "arrival_date", label: "تاريخ الوصول", incomingOnly: true },
   { field: "subject", label: "الموضوع" },
-  { field: "sender", label: "اسم و موطن المرسل" },
-  { field: "recipient", label: "المستلم" },
+  { field: "sender", label: "اسم و موطن المرسل", incomingOnly: true },
+  { field: "recipient", label: "المستلم", outgoingOnly: true },
   { field: "destination_service", label: "المصلحة" },
   { field: "source", label: "المصدر والجواب" },
   { field: "notes", label: "النتيجة / ملاحظات" },
 ];
 
+function fieldLabels(kind: string) {
+  return ALL_FIELDS.filter((f) =>
+    kind === "incoming" ? !f.outgoingOnly : !f.incomingOnly,
+  );
+}
+
 function fieldName(field: string | null): string {
   if (!field) return "";
-  const found = FIELD_LABELS.find((f) => f.field === field);
+  const found = ALL_FIELDS.find((f) => f.field === field);
   return found ? found.label : field;
 }
 
@@ -39,11 +45,23 @@ export function ExcelImport({ onClose }: Props) {
 
   const [analyzing, setAnalyzing] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [templateLoading, setTemplateLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [analysis, setAnalysis] = useState<ExcelAnalysis | null>(null);
   const [kind, setKind] = useState<string>("incoming");
   const [restored, setRestored] = useState<string[]>([]);
   const [result, setResult] = useState<ExcelImportResult | null>(null);
+
+  const handleDownloadTemplate = async () => {
+    try {
+      setTemplateLoading(true);
+      await excelCommands.generateTemplate();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setTemplateLoading(false);
+    }
+  };
 
   const handlePick = async () => {
     try {
@@ -83,7 +101,7 @@ export function ExcelImport({ onClose }: Props) {
         return "";
       }
       if (k === "incoming" && base === "recipient") {
-        return col.field ?? "";
+        return "";
       }
       return base;
     }));
@@ -176,13 +194,30 @@ export function ExcelImport({ onClose }: Props) {
               <p className="text-sm text-slate-500 mb-4">
                 اختر ملف Excel (.xlsx أو .xls) وسيتم تحليله تلقائياً واستيراد السجلات إلى القاعدة.
               </p>
-              <button
-                onClick={handlePick}
-                className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-sm transition"
-              >
-                <FileSpreadsheet className="w-4 h-4" />
-                اختيار ملف Excel
-              </button>
+              <div className="flex items-center justify-center gap-3">
+                <button
+                  onClick={handlePick}
+                  className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold text-white bg-emerald-600 hover:bg-emerald-700 rounded-lg shadow-sm transition"
+                >
+                  <FileSpreadsheet className="w-4 h-4" />
+                  اختيار ملف Excel
+                </button>
+                <button
+                  onClick={handleDownloadTemplate}
+                  disabled={templateLoading}
+                  className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold text-slate-700 bg-gray-100 hover:bg-gray-200 rounded-lg shadow-sm transition disabled:opacity-50"
+                >
+                  {templateLoading ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Download className="w-4 h-4" />
+                  )}
+                  تحميل القالب
+                </button>
+              </div>
+              <p className="text-xs text-slate-400 mt-3">
+                يمكنك تحميل قالب Excel جاهز ثم ملؤه واستيراده
+              </p>
             </div>
           )}
 
@@ -280,7 +315,7 @@ export function ExcelImport({ onClose }: Props) {
                               className="w-full px-2 py-1 text-sm border border-gray-300 rounded-md bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500"
                             >
                               <option value="">تجاهل</option>
-                              {FIELD_LABELS.map((f) => (
+                              {fieldLabels(kind).map((f) => (
                                 <option key={f.field} value={f.field}>
                                   {f.label}
                                 </option>

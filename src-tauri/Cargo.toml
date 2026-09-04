@@ -49,3 +49,4 @@ lettre = { version = "0.11", features = ["tokio1-native-tls"] }
 rand = "0.8"
 dirs = "5"
 calamine = { version = "0.26", features = ["dates"] }
+zip = "2"

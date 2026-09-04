@@ -12,8 +12,9 @@
 use calamine::{Data, Range, Reader};
 use chrono::{TimeZone, Utc};
 use serde::{Deserialize, Serialize};
-use std::io::BufReader;
+use std::io::{BufReader, Write};
 use std::path::Path;
+use zip::write::SimpleFileOptions;
 
 use crate::AppState;
 use uuid::Uuid;
@@ -192,7 +193,6 @@ const SOURCE: &[&str] = &[
 const SENDER: &[&str] = &["المرسل", "expediteur", "expéditeur", "المرسلة"];
 const ARRIVAL: &[&str] = &["تاريخالوصول", "تارخالوصول", "تاريخالقدوم", "arrive", "arrivé"];
 const RESULT: &[&str] = &["النتيجة", "النتائج", "resultat", "résultat", "result", "الخلاصة"];
-const CORRESP: &[&str] = &["المراسلة", "المراسلات", "correspondance", "المرفق", "الملف", "attachment"];
 const DEST: &[&str] = &["المصلحة", "الخدمة", "المديرية", "service", "direction"];
 
 /// Group detector keywords used to recognise parent/grouped headers.
@@ -246,9 +246,6 @@ fn resolve_field(header: &str, group: &Option<GroupKey>, kind: ExcelKind) -> Opt
             if has_any(&n, RECIPIENT) || has_any(&n, &["المستلم", "الالية"]) {
                 return Some("recipient".to_string());
             }
-            if has_any(&n, CORRESP) {
-                return None;
-            }
             // Otherwise a date under an outgoing group is the outgoing date.
             if has_any(&n, OUT_DATE) || has_any(&n, IN_DATE) {
                 return Some("date".to_string());
@@ -260,14 +257,7 @@ fn resolve_field(header: &str, group: &Option<GroupKey>, kind: ExcelKind) -> Opt
                 return Some("subject".to_string());
             }
             if has_any(&n, SOURCE) {
-                return if kind == ExcelKind::Outgoing {
-                    Some("source".to_string())
-                } else {
-                    Some("source".to_string())
-                };
-            }
-            if has_any(&n, CORRESP) {
-                return None;
+                return Some("source".to_string());
             }
             if has_any(&n, IN_DATE) || has_any(&n, OUT_DATE) || has_any(&n, &["التاريخ", "date"]) {
                 return if kind == ExcelKind::Outgoing {
@@ -314,20 +304,13 @@ fn resolve_field(header: &str, group: &Option<GroupKey>, kind: ExcelKind) -> Opt
         };
     }
     if has_any(&n, OUT_DATE) {
-        return if kind == ExcelKind::Outgoing {
-            Some("date".to_string())
-        } else {
-            Some("date".to_string())
-        };
+        return Some("date".to_string());
     }
     if has_any(&n, RESULT) {
         return Some("notes".to_string());
     }
     if has_any(&n, SOURCE) {
         return Some("source".to_string());
-    }
-    if has_any(&n, CORRESP) {
-        return None;
     }
     if has_any(&n, DEST) {
         return Some("destination_service".to_string());
@@ -1060,4 +1043,260 @@ fn insert_outgoing(
         )
         .map_err(|e| format!("فشل إدخال السجل: {}", e))?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Excel template generation
+// ---------------------------------------------------------------------------
+
+fn build_template(path: &str) -> Result<(), String> {
+    let file = std::fs::File::create(path).map_err(|e| format!("فشل إنشاء الملف: {}", e))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let opts = SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .compression_level(Some(6));
+
+    let incoming_headers = [
+        "الرقم الترتيبي", "رقم المراسلة", "تاريخ الرسالة", "تاريخ الوصول",
+        "الموضوع", "المرسل", "المصلحة", "المصدر والجواب", "ملاحظات",
+    ];
+    let outgoing_headers = [
+        "الرقم الترتيبي", "رقم المراسلة", "تاريخ الرسالة",
+        "الموضوع", "المستلم", "المصلحة", "المصدر والجواب", "ملاحظات",
+    ];
+
+    // Collect all shared strings.
+    let mut strings: Vec<String> = Vec::new();
+    let mut string_index = std::collections::HashMap::new();
+
+    let add_str = |s: &str, strings: &mut Vec<String>, index: &mut std::collections::HashMap<String, usize>| -> usize {
+        if let Some(&i) = index.get(s) {
+            return i;
+        }
+        let i = strings.len();
+        strings.push(s.to_string());
+        index.insert(s.to_string(), i);
+        i
+    };
+
+    // Add headers to shared strings.
+    for h in &incoming_headers {
+        add_str(h, &mut strings, &mut string_index);
+    }
+    for h in &outgoing_headers {
+        add_str(h, &mut strings, &mut string_index);
+    }
+
+    // --- [Content_Types].xml ---
+    zip.start_file("[Content_Types].xml", opts.clone()).map_err(|e| e.to_string())?;
+    zip.write_all(CONTENT_TYPES_XML.as_bytes()).map_err(|e| e.to_string())?;
+
+    // --- _rels/.rels ---
+    zip.start_file("_rels/.rels", opts.clone()).map_err(|e| e.to_string())?;
+    zip.write_all(RELS_XML.as_bytes()).map_err(|e| e.to_string())?;
+
+    // --- xl/_rels/workbook.xml.rels ---
+    zip.start_file("xl/_rels/workbook.xml.rels", opts.clone()).map_err(|e| e.to_string())?;
+    zip.write_all(WORKBOOK_RELS_XML.as_bytes()).map_err(|e| e.to_string())?;
+
+    // --- xl/styles.xml ---
+    zip.start_file("xl/styles.xml", opts.clone()).map_err(|e| e.to_string())?;
+    zip.write_all(STYLES_XML.as_bytes()).map_err(|e| e.to_string())?;
+
+    // --- xl/workbook.xml ---
+    zip.start_file("xl/workbook.xml", opts.clone()).map_err(|e| e.to_string())?;
+    zip.write_all(WORKBOOK_XML.as_bytes()).map_err(|e| e.to_string())?;
+
+    // --- xl/sharedStrings.xml ---
+    {
+        let mut ss = String::from(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+             <sst xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" \
+             count=\"0\" uniqueCount=\"0\">"
+        );
+        for s in &strings {
+            let escaped = s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+            ss.push_str(&format!("<si><t>{}</t></si>", escaped));
+        }
+        ss.push_str("</sst>");
+        zip.start_file("xl/sharedStrings.xml", opts.clone()).map_err(|e| e.to_string())?;
+        zip.write_all(ss.as_bytes()).map_err(|e| e.to_string())?;
+    }
+
+    // --- xl/worksheets/sheet1.xml (واردات) ---
+    {
+        let sheet_xml = build_sheet_xml(&incoming_headers, &string_index, 50);
+        zip.start_file("xl/worksheets/sheet1.xml", opts.clone()).map_err(|e| e.to_string())?;
+        zip.write_all(sheet_xml.as_bytes()).map_err(|e| e.to_string())?;
+    }
+
+    // --- xl/worksheets/sheet2.xml (صادرات) ---
+    {
+        let sheet_xml = build_sheet_xml(&outgoing_headers, &string_index, 50);
+        zip.start_file("xl/worksheets/sheet2.xml", opts.clone()).map_err(|e| e.to_string())?;
+        zip.write_all(sheet_xml.as_bytes()).map_err(|e| e.to_string())?;
+    }
+
+    zip.finish().map_err(|e| format!("فشل حفظ الملف: {}", e))?;
+    Ok(())
+}
+
+fn col_letter(idx: usize) -> String {
+    let mut s = String::new();
+    let mut i = idx;
+    loop {
+        s.push((b'A' + (i % 26) as u8) as char);
+        i /= 26;
+        if i == 0 { break; }
+        i -= 1;
+    }
+    s
+}
+
+fn build_sheet_xml(headers: &[&str], strings: &std::collections::HashMap<String, usize>, empty_rows: u32) -> String {
+    let mut xml = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n\
+         <worksheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" \
+         xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">\n\
+         <sheetViews><sheetView tabSelected=\"1\" workbookViewId=\"0\" rightToLeft=\"1\"/></sheetViews>\n"
+    );
+
+    // Column widths.
+    xml.push_str("<cols>");
+    let widths: Vec<f64> = headers.iter().map(|h| {
+        // Approximate width based on character count.
+        if h.contains("الموضوع") || h.contains("ملاحظات") { 35.0 }
+        else if h.contains("المرسل") || h.contains("المستلم") || h.contains("المصلحة") || h.contains("المصدر") { 25.0 }
+        else { 18.0 }
+    }).collect();
+    for (i, w) in widths.iter().enumerate() {
+        let min = (i + 1) as u32;
+        xml.push_str(&format!("<col min=\"{}\" max=\"{}\" width=\"{}\" customWidth=\"1\"/>", min, min, w));
+    }
+    xml.push_str("</cols>");
+
+    xml.push_str("<sheetData>");
+
+    // Header row (row 1), bold style index 1.
+    xml.push_str("<row r=\"1\" ht=\"30\">");
+    for (ci, h) in headers.iter().enumerate() {
+        let col = col_letter(ci);
+        let idx = strings.get(*h).unwrap_or(&0);
+        xml.push_str(&format!(
+            "<c r=\"{}1\" t=\"s\" s=\"1\"><v>{}</v></c>",
+            col, idx
+        ));
+    }
+    xml.push_str("</row>");
+
+    // Empty rows with borders.
+    for row in 2..=(empty_rows + 1) {
+        xml.push_str(&format!("<row r=\"{}\">", row));
+        for ci in 0..headers.len() {
+            let col = col_letter(ci);
+            xml.push_str(&format!("<c r=\"{}{}\" s=\"2\"/>", col, row));
+        }
+        xml.push_str("</row>");
+    }
+
+    xml.push_str("</sheetData></worksheet>");
+    xml
+}
+
+// Static XML constants for the xlsx structure.
+const CONTENT_TYPES_XML: &str = "\
+<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">\
+<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>\
+<Default Extension=\"xml\" ContentType=\"application/xml\"/>\
+<Override PartName=\"/xl/workbook.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml\"/>\
+<Override PartName=\"/xl/worksheets/sheet1.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>\
+<Override PartName=\"/xl/worksheets/sheet2.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml\"/>\
+<Override PartName=\"/xl/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml\"/>\
+<Override PartName=\"/xl/sharedStrings.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml\"/>\
+</Types>";
+
+const RELS_XML: &str = "\
+<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument\" Target=\"xl/workbook.xml\"/>\
+</Relationships>";
+
+const WORKBOOK_XML: &str = "\
+<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<workbook xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\" \
+xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\">\
+<sheets>\
+<sheet name=\"واردات\" sheetId=\"1\" r:id=\"rId1\"/>\
+<sheet name=\"صادرات\" sheetId=\"2\" r:id=\"rId2\"/>\
+</sheets></workbook>";
+
+const WORKBOOK_RELS_XML: &str = "\
+<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">\
+<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet1.xml\"/>\
+<Relationship Id=\"rId2\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet\" Target=\"worksheets/sheet2.xml\"/>\
+<Relationship Id=\"rId3\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>\
+<Relationship Id=\"rId4\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings\" Target=\"sharedStrings.xml\"/>\
+</Relationships>";
+
+const STYLES_XML: &str = "\
+<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\
+<styleSheet xmlns=\"http://schemas.openxmlformats.org/spreadsheetml/2006/main\">\
+<numFmts count=\"1\">\
+<numFmt numFmtId=\"14\" formatCode=\"yyyy/mm/dd\"/>\
+</numFmts>\
+<fonts count=\"2\">\
+<font><sz val=\"11\"/><name val=\"Arial\"/></font>\
+<font><b/><sz val=\"12\"/><name val=\"Arial\"/></font>\
+</fonts>\
+<fills count=\"3\">\
+<fill><patternFill patternType=\"none\"/></fill>\
+<fill><patternFill patternType=\"gray125\"/></fill>\
+<fill><patternFill patternType=\"solid\"><fgColor rgb=\"FFD6EAF8\"/></patternFill></fill>\
+</fills>\
+<borders count=\"3\">\
+<border><left/><right/><top/><bottom/><diagonal/></border>\
+<border>\
+<left style=\"medium\"/><right style=\"medium\"/><top style=\"medium\"/><bottom style=\"medium\"/><diagonal/>\
+</border>\
+<border>\
+<left style=\"thin\"/><right style=\"thin\"/><top style=\"thin\"/><bottom style=\"thin\"/><diagonal/>\
+</border>\
+</borders>\
+<cellStyleXfs count=\"1\"><xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\"/></cellStyleXfs>\
+<cellXfs count=\"3\">\
+<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"0\" xfId=\"0\"/>\
+<xf numFmtId=\"0\" fontId=\"1\" fillId=\"2\" borderId=\"1\" xfId=\"0\" applyFont=\"1\" applyFill=\"1\" applyBorder=\"1\" applyAlignment=\"1\"><alignment horizontal=\"center\" vertical=\"center\" wrapText=\"1\"/></xf>\
+<xf numFmtId=\"0\" fontId=\"0\" fillId=\"0\" borderId=\"2\" xfId=\"0\" applyBorder=\"1\" applyAlignment=\"1\"><alignment vertical=\"center\"/></xf>\
+</cellXfs>\
+</styleSheet>";
+
+#[tauri::command]
+pub fn generate_excel_template() -> Result<String, String> {
+    let temp_dir = std::env::temp_dir();
+    let file_path = temp_dir.join("قالب_الاستيراد.xlsx");
+    let path_str = file_path.to_str().unwrap_or("template.xlsx");
+
+    build_template(path_str)?;
+
+    // Open the file with the default application.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", path_str])
+            .creation_flags(0x08000000)
+            .spawn()
+            .map_err(|e| format!("فشل فتح الملف: {}", e))?;
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(path_str)
+            .spawn()
+            .map_err(|e| format!("فشل فتح الملف: {}", e))?;
+    }
+
+    Ok(path_str.to_string())
 }

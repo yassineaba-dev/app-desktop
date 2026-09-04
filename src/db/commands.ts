@@ -145,6 +145,9 @@ export const excelCommands = {
 
   import: (request: ExcelImportRequest) =>
     invoke<ExcelImportResult>("import_excel", { request }),
+
+  generateTemplate: () =>
+    invoke<string>("generate_excel_template"),
 };
 
 export interface ExcelColumn {
