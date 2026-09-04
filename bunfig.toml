@@ -1,0 +1,6 @@
+[install]
+saveTextLockfile = true
+peer = false
+
+[run]
+silent = false
